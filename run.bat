@@ -5,8 +5,8 @@ REM This file can be used with Windows Task Scheduler for automated runs
 cd /d "%~dp0"
 
 REM Activate virtual environment if it exists
-if exist "venv\Scripts\activate.bat" (
-    call venv\Scripts\activate.bat
+if exist "venv-win\Scripts\activate.bat" (
+    call venv-win\Scripts\activate.bat
 )
 
 REM Run the application
@@ -16,7 +16,7 @@ REM Capture exit code
 set EXIT_CODE=%ERRORLEVEL%
 
 REM Deactivate virtual environment
-if exist "venv\Scripts\deactivate.bat" (
+if exist "venv-win\Scripts\deactivate.bat" (
     call deactivate
 )
 

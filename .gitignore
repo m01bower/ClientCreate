@@ -1,8 +1,10 @@
 # Secrets and config (never commit)
 config/
 
-# Virtual environment
+# Virtual environments (OS-specific)
 venv/
+venv-win/
+venv-linux/
 .venv/
 
 # Python cache
