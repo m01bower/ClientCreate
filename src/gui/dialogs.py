@@ -1,0 +1,620 @@
+"""
+Dialog windows for ClientCreate.
+
+Includes:
+- Company name and address verification dialog
+- Email summary dialog
+- API key update dialogs
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+from typing import Optional, List, Callable, Tuple
+
+from services.company_lookup import CompanyAddress, CompanyInfo
+
+
+class CompanyNameDialog(tk.Toplevel):
+    """Dialog for verifying/selecting company name."""
+
+    def __init__(
+        self,
+        parent,
+        entered_name: str,
+        found_names: List[str],
+        best_match: Optional[str]
+    ):
+        """
+        Initialize company name dialog.
+
+        Args:
+            parent: Parent window
+            entered_name: Name entered by user
+            found_names: List of names found from various sources
+            best_match: Suggested best match
+        """
+        super().__init__(parent)
+
+        self.entered_name = entered_name
+        self.found_names = found_names
+        self.best_match = best_match
+        self.result: Optional[str] = None
+
+        self.title("Verify Company Name")
+        self.geometry("520x550")
+        self.minsize(480, 500)
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 520) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 550) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """Build the dialog UI."""
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Header - adjust based on whether we found a different name
+        if self.best_match and self.best_match != self.entered_name:
+            header_text = "We found a potential official company name from web resources."
+        else:
+            header_text = "Please confirm the company name to use."
+
+        ttk.Label(
+            main_frame,
+            text=header_text,
+            font=('Segoe UI', 10)
+        ).pack(anchor=tk.W, pady=(0, 15))
+
+        # Show what was found - always show the info frame
+        info_frame = ttk.LabelFrame(main_frame, text="Names Found from Web Resources", padding=10)
+        info_frame.pack(fill=tk.X, pady=(0, 15))
+
+        ttk.Label(
+            info_frame,
+            text=f"You entered: {self.entered_name}",
+            foreground='gray'
+        ).pack(anchor=tk.W)
+
+        if self.best_match:
+            if self.best_match != self.entered_name:
+                ttk.Label(
+                    info_frame,
+                    text=f"Official name found: {self.best_match}",
+                    font=('Segoe UI', 10, 'bold')
+                ).pack(anchor=tk.W, pady=(5, 0))
+            else:
+                ttk.Label(
+                    info_frame,
+                    text=f"Confirmed: {self.best_match}",
+                    font=('Segoe UI', 10, 'bold'),
+                    foreground='green'
+                ).pack(anchor=tk.W, pady=(5, 0))
+
+        # Selection options
+        ttk.Label(
+            main_frame,
+            text="Which name would you like to use?"
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        # Determine default selection
+        if self.best_match and self.best_match != self.entered_name:
+            default_selection = 'formal'
+        else:
+            default_selection = 'original'
+
+        self.selection_var = tk.StringVar(value=default_selection)
+
+        # Option: Use official/formal name (if different from entered)
+        if self.best_match and self.best_match != self.entered_name:
+            ttk.Radiobutton(
+                main_frame,
+                text=f'Use official name: "{self.best_match}"',
+                variable=self.selection_var,
+                value='formal'
+            ).pack(anchor=tk.W, pady=2)
+
+        # Option: Keep original/entered name
+        ttk.Radiobutton(
+            main_frame,
+            text=f'Use entered name: "{self.entered_name}"',
+            variable=self.selection_var,
+            value='original'
+        ).pack(anchor=tk.W, pady=2)
+
+        # Option: Edit manually
+        ttk.Radiobutton(
+            main_frame,
+            text='Edit manually:',
+            variable=self.selection_var,
+            value='edit'
+        ).pack(anchor=tk.W, pady=2)
+
+        self.edit_var = tk.StringVar(value=self.best_match or self.entered_name)
+        self.edit_entry = ttk.Entry(main_frame, textvariable=self.edit_var, width=45)
+        self.edit_entry.pack(anchor=tk.W, padx=(25, 0), pady=(0, 10))
+
+        # All found names (if multiple)
+        if len(self.found_names) > 1:
+            ttk.Label(
+                main_frame,
+                text="All names found from web:",
+                foreground='gray'
+            ).pack(anchor=tk.W, pady=(10, 5))
+
+            names_text = "\n".join(f"  • {name}" for name in self.found_names[:5])
+            if len(self.found_names) > 5:
+                names_text += f"\n  ... and {len(self.found_names) - 5} more"
+
+            ttk.Label(
+                main_frame,
+                text=names_text,
+                foreground='gray',
+                font=('Segoe UI', 9)
+            ).pack(anchor=tk.W)
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(20, 0))
+
+        ttk.Button(btn_frame, text="Exit", command=self._on_exit).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(btn_frame, text="Confirm", command=self._on_continue).pack(side=tk.RIGHT)
+
+    def _on_continue(self):
+        """Handle continue button."""
+        selection = self.selection_var.get()
+
+        if selection == 'formal':
+            self.result = self.best_match
+        elif selection == 'original':
+            self.result = self.entered_name
+        else:  # edit
+            self.result = self.edit_var.get().strip()
+            if not self.result:
+                messagebox.showwarning("Validation", "Please enter a company name.")
+                return
+
+        self.destroy()
+
+    def _on_cancel(self):
+        """Handle cancel button."""
+        self.result = None
+        self.destroy()
+
+    def _on_exit(self):
+        """Handle exit button - exit entire application."""
+        if messagebox.askyesno("Exit Application", "Are you sure you want to exit the application?"):
+            self.result = None
+            self.destroy()
+            self.master.destroy()
+
+    def get_result(self) -> Optional[str]:
+        """Get the selected company name."""
+        self.wait_window()
+        return self.result
+
+
+class CompanyInfoDialog(tk.Toplevel):
+    """Dialog for verifying company name AND address."""
+
+    def __init__(
+        self,
+        parent,
+        entered_name: str,
+        company_info: CompanyInfo
+    ):
+        """
+        Initialize company info dialog.
+
+        Args:
+            parent: Parent window
+            entered_name: Name entered by user
+            company_info: CompanyInfo with found names and address
+        """
+        super().__init__(parent)
+
+        self.entered_name = entered_name
+        self.company_info = company_info
+        self.result_name: Optional[str] = None
+        self.result_address: Optional[CompanyAddress] = None
+
+        self.title("Verify Company Information")
+        self.geometry("550x750")
+        self.minsize(520, 700)
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 550) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 650) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """Build the dialog UI."""
+        # Main scrollable frame
+        main_frame = ttk.Frame(self, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # === Company Name Section ===
+        name_frame = ttk.LabelFrame(main_frame, text="Company Name", padding=10)
+        name_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(name_frame, text="You entered:", foreground='gray').pack(anchor=tk.W)
+        ttk.Label(name_frame, text=self.entered_name, font=('Segoe UI', 10)).pack(anchor=tk.W)
+
+        if self.company_info.found_names:
+            ttk.Label(name_frame, text="\nNames found from web:", foreground='gray').pack(anchor=tk.W)
+            for name in self.company_info.found_names[:3]:
+                ttk.Label(name_frame, text=f"  • {name}", font=('Segoe UI', 9)).pack(anchor=tk.W)
+
+        ttk.Label(name_frame, text="\nCompany name to use:").pack(anchor=tk.W, pady=(10, 5))
+
+        self.name_var = tk.StringVar(value=self.company_info.name or self.entered_name)
+        self.name_entry = ttk.Entry(name_frame, textvariable=self.name_var, width=50)
+        self.name_entry.pack(fill=tk.X)
+
+        # === Address Section ===
+        addr_frame = ttk.LabelFrame(main_frame, text="Company Address", padding=10)
+        addr_frame.pack(fill=tk.X, pady=(0, 10))
+
+        if self.company_info.source:
+            ttk.Label(
+                addr_frame,
+                text=f"Address found from: {self.company_info.source}",
+                foreground='green'
+            ).pack(anchor=tk.W, pady=(0, 10))
+        elif self.company_info.address.is_empty():
+            ttk.Label(
+                addr_frame,
+                text="No address found - please enter manually",
+                foreground='orange'
+            ).pack(anchor=tk.W, pady=(0, 10))
+
+        # Address fields
+        fields_frame = ttk.Frame(addr_frame)
+        fields_frame.pack(fill=tk.X)
+
+        # Street Address
+        ttk.Label(fields_frame, text="Street Address:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.addr_line1_var = tk.StringVar(value=self.company_info.address.line1)
+        ttk.Entry(fields_frame, textvariable=self.addr_line1_var, width=45).grid(row=0, column=1, sticky=tk.W, pady=2)
+
+        # Address Line 2
+        ttk.Label(fields_frame, text="Suite/Floor:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.addr_line2_var = tk.StringVar(value=self.company_info.address.line2)
+        ttk.Entry(fields_frame, textvariable=self.addr_line2_var, width=45).grid(row=1, column=1, sticky=tk.W, pady=2)
+
+        # City
+        ttk.Label(fields_frame, text="City:").grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.city_var = tk.StringVar(value=self.company_info.address.city)
+        ttk.Entry(fields_frame, textvariable=self.city_var, width=30).grid(row=2, column=1, sticky=tk.W, pady=2)
+
+        # State and ZIP on same row
+        state_zip_frame = ttk.Frame(fields_frame)
+        state_zip_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=2)
+
+        ttk.Label(state_zip_frame, text="State:").pack(side=tk.LEFT)
+        self.state_var = tk.StringVar(value=self.company_info.address.state)
+        ttk.Entry(state_zip_frame, textvariable=self.state_var, width=5).pack(side=tk.LEFT, padx=(5, 20))
+
+        ttk.Label(state_zip_frame, text="ZIP:").pack(side=tk.LEFT)
+        self.zip_var = tk.StringVar(value=self.company_info.address.postal_code)
+        ttk.Entry(state_zip_frame, textvariable=self.zip_var, width=12).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Country
+        ttk.Label(fields_frame, text="Country:").grid(row=4, column=0, sticky=tk.W, pady=2)
+        self.country_var = tk.StringVar(value=self.company_info.address.country or "USA")
+        ttk.Entry(fields_frame, textvariable=self.country_var, width=20).grid(row=4, column=1, sticky=tk.W, pady=2)
+
+        # === Contact Info Section (optional) ===
+        contact_frame = ttk.LabelFrame(main_frame, text="Contact Info (Optional)", padding=10)
+        contact_frame.pack(fill=tk.X, pady=(0, 10))
+
+        contact_fields = ttk.Frame(contact_frame)
+        contact_fields.pack(fill=tk.X)
+
+        ttk.Label(contact_fields, text="Phone:").grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.phone_var = tk.StringVar(value=self.company_info.phone)
+        ttk.Entry(contact_fields, textvariable=self.phone_var, width=20).grid(row=0, column=1, sticky=tk.W, pady=2)
+
+        ttk.Label(contact_fields, text="Email:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.email_var = tk.StringVar(value=self.company_info.email)
+        ttk.Entry(contact_fields, textvariable=self.email_var, width=35, name="email").grid(row=1, column=1, sticky=tk.W, pady=2)
+
+        # === Buttons ===
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(15, 0))
+
+        ttk.Button(btn_frame, text="Exit", command=self._on_exit).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Button(btn_frame, text="Confirm", command=self._on_confirm).pack(side=tk.RIGHT)
+
+    def _on_confirm(self):
+        """Handle confirm button."""
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showwarning("Validation", "Please enter a company name.")
+            return
+
+        self.result_name = name
+        self.result_address = CompanyAddress(
+            line1=self.addr_line1_var.get().strip(),
+            line2=self.addr_line2_var.get().strip(),
+            city=self.city_var.get().strip(),
+            state=self.state_var.get().strip().upper(),
+            postal_code=self.zip_var.get().strip(),
+            country=self.country_var.get().strip() or "USA"
+        )
+
+        # Store phone/email in company_info for later use
+        self.company_info.phone = self.phone_var.get().strip()
+        self.company_info.email = self.email_var.get().strip()
+
+        self.destroy()
+
+    def _on_cancel(self):
+        """Handle cancel button."""
+        self.result_name = None
+        self.result_address = None
+        self.destroy()
+
+    def _on_exit(self):
+        """Handle exit button - exit entire application."""
+        if messagebox.askyesno("Exit Application", "Are you sure you want to exit the application?"):
+            self.result_name = None
+            self.result_address = None
+            self.destroy()
+            self.master.destroy()
+
+    def get_result(self) -> Tuple[Optional[str], Optional[CompanyAddress], Optional[CompanyInfo]]:
+        """Get the verified company name and address."""
+        self.wait_window()
+        return self.result_name, self.result_address, self.company_info
+
+
+class EmailDialog(tk.Toplevel):
+    """Dialog for entering email recipients."""
+
+    def __init__(self, parent):
+        """
+        Initialize email dialog.
+
+        Args:
+            parent: Parent window
+        """
+        super().__init__(parent)
+
+        self.result: Optional[List[str]] = None
+
+        self.title("Email Summary")
+        self.geometry("400x200")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 400) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 200) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """Build the dialog UI."""
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Label explicitly says "Email" to help password managers
+        ttk.Label(
+            main_frame,
+            text="Email addresses (comma-separated):",
+            font=('Segoe UI', 10)
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        self.email_var = tk.StringVar()
+        # Use name="email" so password managers recognize this as an email field
+        self.email_entry = ttk.Entry(main_frame, textvariable=self.email_var, width=45, name="email")
+        self.email_entry.pack(fill=tk.X, pady=(0, 10))
+        self.email_entry.focus()
+
+        ttk.Label(
+            main_frame,
+            text="Example: boss@example.com, team@example.com",
+            foreground='gray'
+        ).pack(anchor=tk.W)
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(30, 0))
+
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Send", command=self._on_send).pack(side=tk.RIGHT)
+
+    def _on_send(self):
+        """Handle send button."""
+        from core.validators import validate_emails
+
+        emails_str = self.email_var.get().strip()
+        valid, error, emails = validate_emails(emails_str)
+
+        if not valid:
+            messagebox.showwarning("Validation", error)
+            return
+
+        self.result = emails
+        self.destroy()
+
+    def _on_cancel(self):
+        """Handle cancel button."""
+        self.result = None
+        self.destroy()
+
+    def get_result(self) -> Optional[List[str]]:
+        """Get the list of email addresses."""
+        self.wait_window()
+        return self.result
+
+
+class UpdateApiKeyDialog(tk.Toplevel):
+    """Dialog for updating an API key."""
+
+    def __init__(self, parent, key_type: str, current_value: str = ""):
+        """
+        Initialize API key update dialog.
+
+        Args:
+            parent: Parent window
+            key_type: Type of key ("HubSpot" or "Google Places")
+            current_value: Current key value
+        """
+        super().__init__(parent)
+
+        self.key_type = key_type
+        self.result: Optional[str] = None
+
+        self.title(f"Update {key_type} API Key")
+        self.geometry("450x180")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 450) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 180) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self.current_value = current_value
+        self._build_ui()
+
+    def _build_ui(self):
+        """Build the dialog UI."""
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            main_frame,
+            text=f"The {self.key_type} API key appears to be invalid.\nPlease enter a new key:",
+            wraplength=400
+        ).pack(anchor=tk.W, pady=(0, 15))
+
+        ttk.Label(main_frame, text="New API Key:").pack(anchor=tk.W)
+
+        self.key_var = tk.StringVar(value=self.current_value)
+        self.key_entry = ttk.Entry(main_frame, textvariable=self.key_var, width=50)
+        self.key_entry.pack(fill=tk.X, pady=(5, 0))
+        self.key_entry.focus()
+        self.key_entry.select_range(0, tk.END)
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(25, 0))
+
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Save", command=self._on_save).pack(side=tk.RIGHT)
+
+    def _on_save(self):
+        """Handle save button."""
+        key = self.key_var.get().strip()
+        if not key:
+            messagebox.showwarning("Validation", "Please enter an API key.")
+            return
+
+        self.result = key
+        self.destroy()
+
+    def _on_cancel(self):
+        """Handle cancel button."""
+        self.result = None
+        self.destroy()
+
+    def get_result(self) -> Optional[str]:
+        """Get the new API key."""
+        self.wait_window()
+        return self.result
+
+
+class ConfirmDialog(tk.Toplevel):
+    """Simple confirmation dialog with custom message."""
+
+    def __init__(self, parent, title: str, message: str, detail: str = ""):
+        """
+        Initialize confirmation dialog.
+
+        Args:
+            parent: Parent window
+            title: Dialog title
+            message: Main message
+            detail: Additional detail text
+        """
+        super().__init__(parent)
+
+        self.result = False
+
+        self.title(title)
+        self.geometry("400x180")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        # Center on parent
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 400) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 180) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self._build_ui(message, detail)
+
+    def _build_ui(self, message: str, detail: str):
+        """Build the dialog UI."""
+        main_frame = ttk.Frame(self, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            main_frame,
+            text=message,
+            font=('Segoe UI', 10),
+            wraplength=360
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        if detail:
+            ttk.Label(
+                main_frame,
+                text=detail,
+                foreground='gray',
+                wraplength=360
+            ).pack(anchor=tk.W)
+
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(30, 0))
+
+        ttk.Button(btn_frame, text="No", command=self._on_no).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Yes", command=self._on_yes).pack(side=tk.RIGHT)
+
+    def _on_yes(self):
+        """Handle yes button."""
+        self.result = True
+        self.destroy()
+
+    def _on_no(self):
+        """Handle no button."""
+        self.result = False
+        self.destroy()
+
+    def get_result(self) -> bool:
+        """Get the dialog result."""
+        self.wait_window()
+        return self.result
