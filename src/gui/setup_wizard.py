@@ -14,7 +14,7 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Callable
 import os
 
-from core.config_manager import AppConfig, GoogleDriveConfig, HubSpotConfig, GooglePlacesConfig, QuickBooksConfig
+from core.config_manager import AppConfig, GoogleDriveConfig, HubSpotConfig, GooglePlacesConfig, QuickBooksConfig, get_config_manager
 from services.google_drive_service import GoogleDriveService
 from services.hubspot_service import HubSpotService
 from services.company_lookup import test_places_api
@@ -50,6 +50,7 @@ class SetupWizard(tk.Toplevel):
         self.google_authenticated = False
         self.hubspot_validated = False
         self.quickbooks_validated = False
+        self._hubspot_token = ""  # Stored in keyring, not in AppConfig
 
         # Window setup
         self.title("ClientCreate - Setup Wizard")
@@ -300,7 +301,8 @@ class SetupWizard(tk.Toplevel):
 
         ttk.Label(self.content_frame, text="Access Token:").pack(anchor=tk.W)
 
-        self.hubspot_var = tk.StringVar(value=self.config.hubspot.access_token)
+        existing_token = self._hubspot_token or get_config_manager().get_hubspot_token() or ""
+        self.hubspot_var = tk.StringVar(value=existing_token)
         token_frame = ttk.Frame(self.content_frame)
         token_frame.pack(fill=tk.X, pady=(5, 10))
 
@@ -590,7 +592,7 @@ class SetupWizard(tk.Toplevel):
             if not token:
                 messagebox.showwarning("Validation", "Please enter HubSpot access token.")
                 return False
-            self.config.hubspot.access_token = token
+            self._hubspot_token = token
 
         elif self.current_step == 4:
             # Google Places (optional)
@@ -633,6 +635,10 @@ class SetupWizard(tk.Toplevel):
         """Complete the wizard."""
         from datetime import datetime
         self.config.created_date = datetime.now().isoformat()
+
+        # Save HubSpot token to OS keyring
+        if self._hubspot_token:
+            get_config_manager().set_hubspot_token(self._hubspot_token)
 
         log_info(f"Setup wizard completed: {self.config.configuration_name}")
         self.on_complete(self.config)

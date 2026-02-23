@@ -17,6 +17,8 @@ from datetime import datetime
 from typing import Optional, Dict, List
 from dataclasses import dataclass, asdict, field
 
+import keyring
+
 from logger_setup import get_logger, log_info, log_error, log_debug
 
 
@@ -25,6 +27,8 @@ from logger_setup import get_logger, log_info, log_error, log_debug
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 CONFIG_DIR = _PROJECT_ROOT / "config"
 CONFIG_FILENAME = 'config.json'
+KEYRING_SERVICE = "BostonHCP"
+KEYRING_USERNAME = "HubSpot-AccessToken"
 HISTORY_FILENAME = 'client_history.json'
 LOG_FILENAME = 'activity_log.txt'
 
@@ -39,7 +43,6 @@ class GoogleDriveConfig:
 @dataclass
 class HubSpotConfig:
     """HubSpot configuration."""
-    access_token: str = ""
     portal_id: str = ""
 
 
@@ -95,7 +98,6 @@ class AppConfig:
 
         hs = data.get('hubspot', {})
         config.hubspot = HubSpotConfig(
-            access_token=hs.get('access_token', ''),
             portal_id=hs.get('portal_id', '')
         )
 
@@ -258,7 +260,7 @@ class ConfigManager:
 
     def update_hubspot_token(self, new_token: str) -> bool:
         """
-        Update HubSpot access token.
+        Update HubSpot access token in the OS keyring.
 
         Args:
             new_token: New access token
@@ -266,12 +268,80 @@ class ConfigManager:
         Returns:
             True on success
         """
-        config = self.get_config()
-        if not config:
+        return self.set_hubspot_token(new_token)
+
+    # =========================================================================
+    # Keyring Token Management
+    # =========================================================================
+
+    def get_hubspot_token(self) -> Optional[str]:
+        """
+        Retrieve the HubSpot access token from the OS keyring.
+
+        Returns:
+            The token string, or None if not stored
+        """
+        try:
+            token = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+            return token
+        except Exception as e:
+            log_error(f"Error reading token from keyring: {e}")
+            return None
+
+    def set_hubspot_token(self, token: str) -> bool:
+        """
+        Store the HubSpot access token in the OS keyring.
+
+        Args:
+            token: The access token to store
+
+        Returns:
+            True on success, False on error
+        """
+        try:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, token)
+            log_info("HubSpot token saved to OS keyring")
+            return True
+        except Exception as e:
+            log_error(f"Error saving token to keyring: {e}")
             return False
 
-        config.hubspot.access_token = new_token
-        return self.save_config(config)
+    def migrate_hubspot_token(self) -> None:
+        """
+        One-time migration: move token from config.json to OS keyring.
+
+        If config.json contains a hubspot.access_token field, this method
+        stores it in the keyring and removes it from the JSON file. Runs
+        silently - no-ops if there is no token to migrate.
+        """
+        config_path = self._get_config_path()
+        if not config_path.exists():
+            return
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        hs = data.get('hubspot', {})
+        old_token = hs.get('access_token')
+        if not old_token:
+            return
+
+        # Store in keyring
+        if not self.set_hubspot_token(old_token):
+            log_error("Migration failed: could not save token to keyring")
+            return
+
+        # Remove from JSON and rewrite
+        del data['hubspot']['access_token']
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            log_info("Migrated HubSpot token from config.json to OS keyring")
+        except Exception as e:
+            log_error(f"Migration warning: token saved to keyring but could not update config.json: {e}")
 
     def update_places_api_key(self, new_key: str) -> bool:
         """

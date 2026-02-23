@@ -213,6 +213,9 @@ class MainWindow(tk.Tk):
         # Initialize config manager first (local storage - no auth needed)
         self.config_manager = init_config_manager()
 
+        # Auto-migrate token from config.json to keyring (one-time, silent)
+        self.config_manager.migrate_hubspot_token()
+
         # Check for existing local configuration (standalone mode)
         if self.config_manager.has_config():
             self._append_status("Loading configuration...")
@@ -274,9 +277,10 @@ class MainWindow(tk.Tk):
         if not self.app_config:
             return
 
-        # Initialize HubSpot service
-        if self.app_config.hubspot.access_token:
-            self.hubspot_service = init_hubspot_service(self.app_config.hubspot.access_token)
+        # Initialize HubSpot service (token stored in OS keyring)
+        hubspot_token = self.config_manager.get_hubspot_token()
+        if hubspot_token:
+            self.hubspot_service = init_hubspot_service(hubspot_token)
 
         # Initialize company lookup service
         self.lookup_service = get_company_lookup_service()
