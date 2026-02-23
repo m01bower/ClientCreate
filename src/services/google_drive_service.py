@@ -23,12 +23,13 @@ from googleapiclient.errors import HttpError
 from logger_setup import get_logger, log_info, log_error, log_warning, log_debug
 
 
-# OAuth scopes required
+# Google API scopes - shared across BostonHCP projects
 SCOPES = [
-    'openid',  # Required by Google OAuth2
-    'https://www.googleapis.com/auth/drive',  # Full Drive access
-    'https://www.googleapis.com/auth/gmail.send',  # Send emails
-    'https://www.googleapis.com/auth/userinfo.email',  # Get user email address
+    'openid',
+    'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/userinfo.email',
 ]
 
 
@@ -49,12 +50,12 @@ class GoogleDriveService:
         # src/services/google_drive_service.py -> up 3 levels = project root
         self._project_root = Path(__file__).parent.parent.parent
 
-        # Credentials stored in project's config folder
-        self._credentials_base = self._project_root / "config"
+        # Shared credentials in _shared_config/clients/BostonHCP/
+        self._credentials_base = self._project_root.parent / "_shared_config" / "clients" / "BostonHCP"
         self.credentials_path = credentials_path or str(self._credentials_base / "credentials.json")
 
-        # Token stored in project's config folder
-        self._token_base = self._project_root / "config"
+        # Token stored in shared BostonHCP folder
+        self._token_base = self._credentials_base
         self.token_path = str(self._token_base / "token.json")
 
         self.creds: Optional[Credentials] = None
