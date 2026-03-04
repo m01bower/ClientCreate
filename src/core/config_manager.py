@@ -53,6 +53,12 @@ class GooglePlacesConfig:
 
 
 @dataclass
+class OpenCorporatesConfig:
+    """OpenCorporates API configuration."""
+    api_token: str = ""
+
+
+@dataclass
 class QuickBooksConfig:
     """QuickBooks Online configuration."""
     client_id: str = ""
@@ -71,6 +77,7 @@ class AppConfig:
     hubspot: HubSpotConfig = field(default_factory=HubSpotConfig)
     google_places: GooglePlacesConfig = field(default_factory=GooglePlacesConfig)
     quickbooks: QuickBooksConfig = field(default_factory=QuickBooksConfig)
+    opencorporates: OpenCorporatesConfig = field(default_factory=OpenCorporatesConfig)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -80,7 +87,8 @@ class AppConfig:
             'google_drive': asdict(self.google_drive),
             'hubspot': asdict(self.hubspot),
             'google_places': asdict(self.google_places),
-            'quickbooks': asdict(self.quickbooks)
+            'quickbooks': asdict(self.quickbooks),
+            'opencorporates': asdict(self.opencorporates)
         }
 
     @classmethod
@@ -113,6 +121,11 @@ class AppConfig:
             realm_id=qb.get('realm_id', ''),
             use_sandbox=qb.get('use_sandbox', True),
             trial_mode=qb.get('trial_mode', True)
+        )
+
+        oc = data.get('opencorporates', {})
+        config.opencorporates = OpenCorporatesConfig(
+            api_token=oc.get('api_token', '')
         )
 
         return config

@@ -28,9 +28,10 @@ from core.url_utils import parse_url_parts
 from logger_setup import setup_logger, set_status_callback, log_info, log_error, log_warning, log_debug
 
 from gui.setup_wizard import SetupWizard
-from gui.dialogs import CompanyNameDialog, CompanyInfoDialog, EmailDialog, ConfirmDialog, UpdateApiKeyDialog
-from services.company_lookup import CompanyInfo, CompanyAddress
+from gui.dialogs import CompanyNameDialog, CompanyInfoDialog, EmailDialog, UpdateApiKeyDialog
+from services.company_lookup import CompanyInfo, CompanyAddress, ClientData
 from gui.history_window import HistoryWindow
+from services.rates_service import get_rates_service
 
 
 class MainWindow(tk.Tk):
@@ -286,6 +287,8 @@ class MainWindow(tk.Tk):
         self.lookup_service = get_company_lookup_service()
         if self.app_config.google_places.api_key:
             self.lookup_service.set_places_api_key(self.app_config.google_places.api_key)
+        if self.app_config.opencorporates.api_token:
+            self.lookup_service.opencorporates_token = self.app_config.opencorporates.api_token
 
         # Initialize QuickBooks service
         # trial_mode follows the config setting (default True for safety)
@@ -592,12 +595,49 @@ Version 1.1
             else:
                 log_info("No address found from website")
 
+            if company_info.corp_registration:
+                reg = company_info.corp_registration
+                log_info(f"Corp registration: {reg.entity_name} ({reg.state}, {reg.status})")
+
+            social_count = sum(1 for v in vars(company_info.social_media).values() if v)
+            if social_count:
+                log_info(f"Found {social_count} social media link(s)")
+
+            if company_info.executives:
+                log_info(f"Found {len(company_info.executives)} executive(s)")
+
+            # Fetch default rates for the Rates tab
+            default_rates = None
+            rates_service = get_rates_service(self.drive_service)
+            if rates_service:
+                try:
+                    default_rates = rates_service.get_defaults()
+                    log_info("Loaded default billing rates from spreadsheet")
+                except Exception as e:
+                    log_warning(f"Could not load default rates: {e}")
+
+            # Search HubSpot BEFORE dialog so we can show it as a tab
+            hubspot_existing = None
+            hubspot_configured = False
+            if self.hubspot_service:
+                hubspot_configured = True
+                hubspot_existing = self.hubspot_service.search_company(
+                    company_name, url_parts['domain_for_hubspot']
+                )
+                if hubspot_existing:
+                    log_info(f"HubSpot: Found existing company '{hubspot_existing['name']}'")
+
             # Show dialog for verification on main thread
-            dialog_result = [None, None, None]  # name, address, company_info
+            dialog_result = [None, None, None, None, None]  # name, address, company_info, rates_data, create_deal
 
             def show_info_dialog():
-                dialog = CompanyInfoDialog(self, company_name, company_info)
-                dialog_result[0], dialog_result[1], dialog_result[2] = dialog.get_result()
+                dialog = CompanyInfoDialog(
+                    self, company_name, company_info, default_rates,
+                    hubspot_existing=hubspot_existing,
+                    hubspot_configured=hubspot_configured
+                )
+                (dialog_result[0], dialog_result[1], dialog_result[2],
+                 dialog_result[3], dialog_result[4]) = dialog.get_result()
 
             self.after(0, show_info_dialog)
 
@@ -621,12 +661,47 @@ Version 1.1
                 # Store phone/email from dialog
                 if dialog_result[2]:
                     company_info = dialog_result[2]
+
+                # Store deal choice from dialog
+                create_deal_choice = dialog_result[4]
+
+                # Write rates if provided
+                rates_data = dialog_result[3]
+                if rates_data and rates_service:
+                    if not dry_run:
+                        try:
+                            success = rates_service.write_rates(company_name, rates_data)
+                            if success:
+                                log_info("Billing rates written to Rates spreadsheet")
+                            else:
+                                log_warning("Failed to write billing rates")
+                        except Exception as e:
+                            log_error(f"Error writing billing rates: {e}")
+                    else:
+                        log_info("[DRY RUN] Would write billing rates to Rates spreadsheet")
+                    result['rates_data'] = rates_data
             else:
                 result['cancelled'] = True
                 return result
         else:
             log_info("Company lookup service not configured, using entered name")
             company_info = CompanyInfo(name=company_name)
+            hubspot_existing = None
+            create_deal_choice = True
+
+        # Build unified ClientData record from dialog results
+        client_data = ClientData(
+            company_name=company_name,
+            legal_name=company_name,
+            domain=url_parts['domain'],
+            website_url=url_parts.get('fetch_url', ''),
+            address=company_address,
+            phone=company_info.phone if company_info else '',
+            email=company_info.email if company_info else '',
+            corp_registration=company_info.corp_registration if company_info else None,
+            executives=company_info.executives if company_info else [],
+            social_media=company_info.social_media if company_info else None,
+        )
 
         # Step 2: HubSpot (run first to validate company data)
         if self.cancel_requested:
@@ -635,16 +710,11 @@ Version 1.1
 
         log_info("\n--- HubSpot ---")
         skip_deal_creation = False  # Track if user declined deal creation
+        existing = hubspot_existing  # Already searched before dialog
 
         if not self.hubspot_service:
             log_warning("HubSpot service not configured, skipping...")
         else:
-            # Search for existing company
-            existing = self.hubspot_service.search_company(
-                company_name,
-                url_parts['domain_for_hubspot']
-            )
-
             if existing:
                 log_warning(f"Company already exists: {existing['name']}")
 
@@ -660,30 +730,10 @@ Version 1.1
                 result['hubspot_company_id'] = existing['id']
                 result['hubspot_company_url'] = self.hubspot_service.get_company_url(existing['id'])
 
-                # Ask user if they want to create a new deal
-                create_deal = [None]
-
-                def ask_deal():
-                    dialog = ConfirmDialog(
-                        self,
-                        "Company Exists",
-                        f"Company '{existing['name']}' already exists in HubSpot.",
-                        "Create a new deal for this company?"
-                    )
-                    create_deal[0] = dialog.get_result()
-
-                self.after(0, ask_deal)
-
-                while create_deal[0] is None:
-                    if self.cancel_requested:
-                        result['cancelled'] = True
-                        return result
-                    time.sleep(0.1)  # Sleep 100ms to avoid CPU spinning
-
-                if not create_deal[0]:
-                    # User declined to create deal - continue without creating deal
+                # Use deal choice from the dialog
+                if create_deal_choice is False:
                     skip_deal_creation = True
-                    log_info("Skipping deal creation, continuing to Google Drive...")
+                    log_info("Skipping deal creation (user declined in dialog)")
 
             else:
                 # Create company
@@ -900,6 +950,13 @@ Version 1.1
                 log_warning(f"QuickBooks customer created with issues: {qbo_result.issues}")
             elif qbo_result.status == QBOStatus.ERROR.value:
                 log_error(f"QuickBooks error: {qbo_result.message}")
+
+        # Populate ClientData with output system IDs
+        client_data.hubspot_company_id = result.get('hubspot_company_id', '')
+        client_data.hubspot_deal_id = result.get('hubspot_deal_id', '')
+        client_data.drive_folder_id = result.get('drive_folder_id', '')
+        client_data.quickbooks_customer_id = result.get('quickbooks_customer_id', '')
+        result['client_data'] = client_data
 
         result['success'] = True
         return result
