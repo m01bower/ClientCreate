@@ -444,11 +444,18 @@ class QuickBooksService:
         }
 
         if method.upper() == 'GET':
-            return requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers)
         elif method.upper() == 'POST':
-            return requests.post(url, headers=headers, json=data)
+            response = requests.post(url, headers=headers, json=data)
         else:
             raise ValueError(f"Unsupported HTTP method: {method}")
+
+        # Capture intuit_tid for Intuit support troubleshooting
+        intuit_tid = response.headers.get('intuit_tid')
+        if intuit_tid:
+            log_debug(f"intuit_tid: {intuit_tid}")
+
+        return response
 
     # =========================================================================
     # Customer Operations
