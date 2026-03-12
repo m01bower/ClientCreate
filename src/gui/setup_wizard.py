@@ -14,7 +14,13 @@ from tkinter import ttk, filedialog, messagebox
 from typing import Optional, Callable
 import os
 
-from core.config_manager import AppConfig, GoogleDriveConfig, HubSpotConfig, GooglePlacesConfig, QuickBooksConfig, get_config_manager
+import keyring
+from core.config_manager import (
+    AppConfig, GoogleDriveConfig, HubSpotConfig, GooglePlacesConfig,
+    QuickBooksConfig, get_config_manager, _get_master_config,
+    QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID, QBO_KEYRING_CLIENT_SECRET,
+    PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME,
+)
 from services.google_drive_service import GoogleDriveService
 from services.hubspot_service import HubSpotService
 from services.company_lookup import test_places_api
@@ -45,6 +51,12 @@ class SetupWizard(tk.Toplevel):
         self.config.hubspot = HubSpotConfig()
         self.config.google_places = GooglePlacesConfig()
         self.config.quickbooks = QuickBooksConfig()
+
+        # Load available clients from master config
+        self._master_config = _get_master_config()
+        self._available_clients = (
+            self._master_config.list_clients() if self._master_config else []
+        )
 
         # Track validation state
         self.google_authenticated = False
@@ -164,27 +176,94 @@ class SetupWizard(tk.Toplevel):
         step_methods[step]()
 
     def _show_step_name(self):
-        """Step 1: Configuration name."""
-        self.title_label.config(text="Configuration Name")
+        """Step 1: Configuration name (client selection)."""
+        self.title_label.config(text="Client Configuration")
 
-        ttk.Label(
-            self.content_frame,
-            text="What would you like to name this configuration?",
-            wraplength=480
-        ).pack(anchor=tk.W, pady=(0, 5))
+        if self._available_clients:
+            ttk.Label(
+                self.content_frame,
+                text="Select the client configuration to use.\n"
+                     "Settings will be loaded from the master config sheet.",
+                wraplength=480
+            ).pack(anchor=tk.W, pady=(0, 20))
 
-        ttk.Label(
-            self.content_frame,
-            text="(e.g., your company name or client name)",
-            foreground='gray'
-        ).pack(anchor=tk.W, pady=(0, 20))
+            ttk.Label(self.content_frame, text="Client:").pack(anchor=tk.W)
 
-        ttk.Label(self.content_frame, text="Configuration Name:").pack(anchor=tk.W)
+            self.name_var = tk.StringVar(value=self.config.configuration_name)
+            self.name_combo = ttk.Combobox(
+                self.content_frame,
+                textvariable=self.name_var,
+                values=self._available_clients,
+                width=47,
+                state='readonly'
+            )
+            self.name_combo.pack(anchor=tk.W, pady=(5, 0))
 
-        self.name_var = tk.StringVar(value=self.config.configuration_name)
-        self.name_entry = ttk.Entry(self.content_frame, textvariable=self.name_var, width=50)
-        self.name_entry.pack(anchor=tk.W, pady=(5, 0))
-        self.name_entry.focus()
+            # Pre-select if we already have a value
+            if self.config.configuration_name in self._available_clients:
+                self.name_combo.set(self.config.configuration_name)
+            elif self._available_clients:
+                self.name_combo.current(0)
+
+            self.name_combo.focus()
+
+            # Bind selection change to pre-populate later steps
+            self.name_combo.bind('<<ComboboxSelected>>', self._on_client_selected)
+        else:
+            # Fallback: free text entry if master config unavailable
+            ttk.Label(
+                self.content_frame,
+                text="Master config not available. Enter a configuration name manually.",
+                wraplength=480
+            ).pack(anchor=tk.W, pady=(0, 5))
+
+            ttk.Label(
+                self.content_frame,
+                text="(e.g., your company name or client name)",
+                foreground='gray'
+            ).pack(anchor=tk.W, pady=(0, 20))
+
+            ttk.Label(self.content_frame, text="Configuration Name:").pack(anchor=tk.W)
+
+            self.name_var = tk.StringVar(value=self.config.configuration_name)
+            self.name_entry = ttk.Entry(self.content_frame, textvariable=self.name_var, width=50)
+            self.name_entry.pack(anchor=tk.W, pady=(5, 0))
+            self.name_entry.focus()
+
+    def _on_client_selected(self, event=None):
+        """Pre-populate config fields when a client is selected from the dropdown."""
+        client_key = self.name_var.get().strip()
+        if not client_key or not self._master_config:
+            return
+
+        try:
+            client_cfg = self._master_config.get_client(client_key)
+
+            # Pre-populate Drive folder IDs
+            if client_cfg.drive.template_folder_id:
+                self.config.google_drive.template_folder_id = client_cfg.drive.template_folder_id
+            if client_cfg.drive.destination_folder_id:
+                self.config.google_drive.destination_folder_id = client_cfg.drive.destination_folder_id
+
+            # Pre-populate HubSpot
+            if client_cfg.hubspot.portal_id:
+                self.config.hubspot.portal_id = client_cfg.hubspot.portal_id
+            if client_cfg.hubspot.deal_pipeline:
+                self.config.hubspot.deal_pipeline = client_cfg.hubspot.deal_pipeline
+            if client_cfg.hubspot.deal_stage:
+                self.config.hubspot.deal_stage = client_cfg.hubspot.deal_stage
+
+            # Pre-populate QBO realm/environment
+            if client_cfg.qbo.realm_id:
+                self.config.quickbooks.realm_id = client_cfg.qbo.realm_id
+            if client_cfg.qbo.environment:
+                self.config.quickbooks.use_sandbox = (
+                    client_cfg.qbo.environment.lower() == "sandbox"
+                )
+
+            log_info(f"Pre-populated config from master for client '{client_key}'")
+        except KeyError:
+            log_warning(f"Client '{client_key}' not found in master config")
 
     def _show_step_google_auth(self):
         """Step 2: Google Drive authentication."""
@@ -234,11 +313,25 @@ class SetupWizard(tk.Toplevel):
         """Step 3: Google Drive folder IDs."""
         self.title_label.config(text="Google Drive Folders")
 
-        ttk.Label(
-            self.content_frame,
-            text="Enter the Google Drive folder IDs for template and destination folders.",
-            wraplength=480
-        ).pack(anchor=tk.W, pady=(0, 20))
+        # Check if values came from master config
+        from_master = bool(
+            self._master_config
+            and self.config.google_drive.template_folder_id
+        )
+
+        if from_master:
+            ttk.Label(
+                self.content_frame,
+                text="Google Drive folder IDs loaded from master config.\n"
+                     "You can test access below.",
+                wraplength=480
+            ).pack(anchor=tk.W, pady=(0, 20))
+        else:
+            ttk.Label(
+                self.content_frame,
+                text="Enter the Google Drive folder IDs for template and destination folders.",
+                wraplength=480
+            ).pack(anchor=tk.W, pady=(0, 20))
 
         # Template folder
         ttk.Label(self.content_frame, text="Template Folder ID:").pack(anchor=tk.W)
@@ -247,7 +340,11 @@ class SetupWizard(tk.Toplevel):
         template_frame = ttk.Frame(self.content_frame)
         template_frame.pack(fill=tk.X, pady=(5, 15))
 
-        self.template_entry = ttk.Entry(template_frame, textvariable=self.template_var, width=45)
+        entry_state = 'readonly' if from_master else 'normal'
+        self.template_entry = ttk.Entry(
+            template_frame, textvariable=self.template_var,
+            width=45, state=entry_state
+        )
         self.template_entry.pack(side=tk.LEFT)
 
         ttk.Button(
@@ -267,7 +364,10 @@ class SetupWizard(tk.Toplevel):
         dest_frame = ttk.Frame(self.content_frame)
         dest_frame.pack(fill=tk.X, pady=(5, 15))
 
-        self.dest_entry = ttk.Entry(dest_frame, textvariable=self.dest_var, width=45)
+        self.dest_entry = ttk.Entry(
+            dest_frame, textvariable=self.dest_var,
+            width=45, state=entry_state
+        )
         self.dest_entry.pack(side=tk.LEFT)
 
         ttk.Button(
@@ -281,13 +381,21 @@ class SetupWizard(tk.Toplevel):
         self.dest_status.pack(side=tk.LEFT, padx=(10, 0))
 
         # Help text
-        ttk.Label(
-            self.content_frame,
-            text="Tip: The folder ID is in the URL when viewing a folder in Google Drive.\n"
-                 "Example: https://drive.google.com/drive/folders/0B1FbH7xek1OYxxx",
-            foreground='gray',
-            wraplength=480
-        ).pack(anchor=tk.W, pady=(20, 0))
+        if from_master:
+            ttk.Label(
+                self.content_frame,
+                text="These values are managed in the master config sheet.",
+                foreground='gray',
+                wraplength=480
+            ).pack(anchor=tk.W, pady=(20, 0))
+        else:
+            ttk.Label(
+                self.content_frame,
+                text="Tip: The folder ID is in the URL when viewing a folder in Google Drive.\n"
+                     "Example: https://drive.google.com/drive/folders/0B1FbH7xek1OYxxx",
+                foreground='gray',
+                wraplength=480
+            ).pack(anchor=tk.W, pady=(20, 0))
 
     def _show_step_hubspot(self):
         """Step 4: HubSpot authentication."""
@@ -354,7 +462,8 @@ class SetupWizard(tk.Toplevel):
 
         ttk.Label(self.content_frame, text="API Key:").pack(anchor=tk.W)
 
-        self.places_var = tk.StringVar(value=self.config.google_places.api_key)
+        stored_places_key = keyring.get_password(PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME) or ""
+        self.places_var = tk.StringVar(value=stored_places_key)
         key_frame = ttk.Frame(self.content_frame)
         key_frame.pack(fill=tk.X, pady=(5, 10))
 
@@ -392,14 +501,18 @@ class SetupWizard(tk.Toplevel):
         # Client ID
         ttk.Label(self.content_frame, text="Client ID:").pack(anchor=tk.W)
 
-        self.qbo_client_id_var = tk.StringVar(value=self.config.quickbooks.client_id)
+        # Pre-populate from keyring
+        stored_client_id = keyring.get_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID) or ""
+        stored_client_secret = keyring.get_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET) or ""
+
+        self.qbo_client_id_var = tk.StringVar(value=stored_client_id)
         self.qbo_client_id_entry = ttk.Entry(self.content_frame, textvariable=self.qbo_client_id_var, width=50)
         self.qbo_client_id_entry.pack(anchor=tk.W, pady=(5, 15))
 
         # Client Secret
         ttk.Label(self.content_frame, text="Client Secret:").pack(anchor=tk.W)
 
-        self.qbo_client_secret_var = tk.StringVar(value=self.config.quickbooks.client_secret)
+        self.qbo_client_secret_var = tk.StringVar(value=stored_client_secret)
         secret_frame = ttk.Frame(self.content_frame)
         secret_frame.pack(fill=tk.X, pady=(5, 10))
 
@@ -561,12 +674,14 @@ class SetupWizard(tk.Toplevel):
     def _validate_step(self) -> bool:
         """Validate current step before proceeding."""
         if self.current_step == 0:
-            # Configuration name
+            # Configuration name / client selection
             name = self.name_var.get().strip()
             if not name:
-                messagebox.showwarning("Validation", "Please enter a configuration name.")
+                messagebox.showwarning("Validation", "Please select a client configuration.")
                 return False
             self.config.configuration_name = name
+            # Pre-populate master config values for the selected client
+            self._on_client_selected()
 
         elif self.current_step == 1:
             # Google auth
@@ -595,8 +710,10 @@ class SetupWizard(tk.Toplevel):
             self._hubspot_token = token
 
         elif self.current_step == 4:
-            # Google Places (optional)
+            # Google Places (optional) - save to OS keyring
             api_key = self.places_var.get().strip()
+            if api_key:
+                keyring.set_password(PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME, api_key)
             self.config.google_places.api_key = api_key
 
         elif self.current_step == 5:
@@ -609,6 +726,10 @@ class SetupWizard(tk.Toplevel):
                 messagebox.showwarning("Validation", "Please enter both Client ID and Client Secret, or leave both empty to skip.")
                 return False
 
+            # Save credentials to OS keyring (not config.json)
+            if client_id and client_secret:
+                keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID, client_id)
+                keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET, client_secret)
             self.config.quickbooks.client_id = client_id
             self.config.quickbooks.client_secret = client_secret
             self.config.quickbooks.use_sandbox = self.qbo_sandbox_var.get()

@@ -1,20 +1,30 @@
 """
 Configuration manager for ClientCreate.
 
-Manages configuration stored locally in the project's config/ folder.
-Also handles client history and activity logging.
+Non-secret settings (Drive folder IDs, HubSpot portal/pipeline,
+QBO realm_id, sandbox flag) come exclusively from the MasterConfig
+Google Sheet.  MasterConfig is REQUIRED - there is no local fallback.
+
+Secrets stay local:
+    - QBO client_id, client_secret (OS keyring, service "BosOpt")
+    - QBO tokens (config/qbo_tokens.json)
+    - HubSpot access token (OS keyring, service "BostonHCP")
+    - Google credentials.json, token.json
+    - Google Places API key (OS keyring, service "BosOpt")
+    - Client history (config/client_history.json)
 
 Configuration is stored in:
-    <project_root>/config/config.json
+    <project_root>/config/config.json         (local secrets only)
     <project_root>/config/client_history.json
     <project_root>/config/activity_log.txt
+    _shared_config/ master config sheet       (non-secret settings)
 """
 
-import os
+import sys
 import json
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, List
 from dataclasses import dataclass, asdict, field
 
 import keyring
@@ -29,48 +39,121 @@ CONFIG_DIR = _PROJECT_ROOT / "config"
 CONFIG_FILENAME = 'config.json'
 KEYRING_SERVICE = "BostonHCP"
 KEYRING_USERNAME = "HubSpot-AccessToken"
+QBO_KEYRING_SERVICE = "BosOpt"
+QBO_KEYRING_CLIENT_ID = "QBO-ClientID"
+QBO_KEYRING_CLIENT_SECRET = "QBO-ClientSecret"
+PLACES_KEYRING_SERVICE = "BosOpt"
+PLACES_KEYRING_USERNAME = "GooglePlaces-APIKey"
 HISTORY_FILENAME = 'client_history.json'
 LOG_FILENAME = 'activity_log.txt'
+
+# Shared config path - sibling to project root
+_SHARED_CONFIG_DIR = _PROJECT_ROOT.parent / "_shared_config"
+
+
+def _get_master_config():
+    """
+    Import and instantiate MasterConfig from _shared_config.
+
+    Raises RuntimeError if MasterConfig cannot be loaded - there is no
+    local fallback for non-secret configuration.
+    """
+    try:
+        # Add _shared_config to sys.path temporarily if needed
+        shared_str = str(_SHARED_CONFIG_DIR)
+        added = False
+        if shared_str not in sys.path:
+            sys.path.insert(0, shared_str)
+            added = True
+
+        from config_reader import MasterConfig
+        mc = MasterConfig()
+
+        if added:
+            sys.path.remove(shared_str)
+
+        return mc
+    except Exception as e:
+        raise RuntimeError(
+            f"MasterConfig is required but could not be loaded: {e}\n"
+            f"Ensure _shared_config is available at: {_SHARED_CONFIG_DIR}"
+        ) from e
 
 
 @dataclass
 class GoogleDriveConfig:
-    """Google Drive configuration."""
+    """Google Drive configuration (values from master config)."""
     template_folder_id: str = ""
     destination_folder_id: str = ""
 
 
 @dataclass
 class HubSpotConfig:
-    """HubSpot configuration."""
+    """HubSpot configuration (non-secret values from master config)."""
     portal_id: str = ""
+    deal_pipeline: str = ""
+    deal_stage: str = ""
 
 
 @dataclass
 class GooglePlacesConfig:
-    """Google Places API configuration."""
+    """Google Places API configuration (from OS keyring)."""
     api_key: str = ""
+
+    def load_from_keyring(self) -> None:
+        """Populate api_key from the OS keyring."""
+        try:
+            self.api_key = keyring.get_password(
+                PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME
+            ) or ""
+        except Exception as e:
+            from logger_setup import log_error as _log_error
+            _log_error(f"Failed to read Google Places API key from keyring: {e}")
+            self.api_key = ""
 
 
 @dataclass
 class OpenCorporatesConfig:
-    """OpenCorporates API configuration."""
+    """OpenCorporates API configuration (local secret)."""
     api_token: str = ""
 
 
 @dataclass
 class QuickBooksConfig:
-    """QuickBooks Online configuration."""
+    """QuickBooks Online configuration.
+
+    realm_id and use_sandbox come from master config.
+    client_id and client_secret come from the OS keyring
+    (service "BosOpt", usernames "QBO-ClientID" / "QBO-ClientSecret").
+    """
     client_id: str = ""
     client_secret: str = ""
     realm_id: str = ""
     use_sandbox: bool = True
     trial_mode: bool = True  # Always start in trial mode for safety
 
+    def load_credentials_from_keyring(self) -> None:
+        """Populate client_id and client_secret from the OS keyring."""
+        try:
+            self.client_id = keyring.get_password(
+                QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID
+            ) or ""
+            self.client_secret = keyring.get_password(
+                QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET
+            ) or ""
+        except Exception as e:
+            from logger_setup import log_error as _log_error
+            _log_error(f"Failed to read QBO credentials from keyring: {e}")
+            self.client_id = ""
+            self.client_secret = ""
+
 
 @dataclass
 class AppConfig:
-    """Main application configuration."""
+    """Main application configuration.
+
+    Combines master config (non-secret) with local secrets.
+    """
     configuration_name: str = ""
     created_date: str = ""
     google_drive: GoogleDriveConfig = field(default_factory=GoogleDriveConfig)
@@ -80,48 +163,40 @@ class AppConfig:
     opencorporates: OpenCorporatesConfig = field(default_factory=OpenCorporatesConfig)
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Only serializes local secrets - master config values are not saved
+        to config.json since they come from the shared sheet.
+        """
         return {
             'configuration_name': self.configuration_name,
             'created_date': self.created_date,
-            'google_drive': asdict(self.google_drive),
-            'hubspot': asdict(self.hubspot),
-            'google_places': asdict(self.google_places),
-            'quickbooks': asdict(self.quickbooks),
-            'opencorporates': asdict(self.opencorporates)
+            'quickbooks': {
+                'trial_mode': self.quickbooks.trial_mode,
+            },
+            'opencorporates': asdict(self.opencorporates),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> 'AppConfig':
-        """Create from dictionary."""
+        """Create from dictionary (local secrets only).
+
+        Only reads secret fields from config.json.  Non-secret values
+        (Drive folders, HubSpot portal/pipeline, QBO realm/sandbox)
+        come exclusively from MasterConfig via _merge_master_config().
+        """
         config = cls()
         config.configuration_name = data.get('configuration_name', '')
         config.created_date = data.get('created_date', '')
 
-        gd = data.get('google_drive', {})
-        config.google_drive = GoogleDriveConfig(
-            template_folder_id=gd.get('template_folder_id', ''),
-            destination_folder_id=gd.get('destination_folder_id', '')
-        )
-
-        hs = data.get('hubspot', {})
-        config.hubspot = HubSpotConfig(
-            portal_id=hs.get('portal_id', '')
-        )
-
-        gp = data.get('google_places', {})
-        config.google_places = GooglePlacesConfig(
-            api_key=gp.get('api_key', '')
-        )
+        config.google_places = GooglePlacesConfig()
+        config.google_places.load_from_keyring()
 
         qb = data.get('quickbooks', {})
         config.quickbooks = QuickBooksConfig(
-            client_id=qb.get('client_id', ''),
-            client_secret=qb.get('client_secret', ''),
-            realm_id=qb.get('realm_id', ''),
-            use_sandbox=qb.get('use_sandbox', True),
             trial_mode=qb.get('trial_mode', True)
         )
+        config.quickbooks.load_credentials_from_keyring()
 
         oc = data.get('opencorporates', {})
         config.opencorporates = OpenCorporatesConfig(
@@ -171,7 +246,11 @@ class ClientRecord:
 
 
 class ConfigManager:
-    """Manager for application configuration stored locally."""
+    """Manager for application configuration.
+
+    Merges shared master config (non-secret settings from Google Sheet)
+    with local secrets (config/config.json + OS keyring).
+    """
 
     def __init__(self, config_dir: Optional[Path] = None):
         """
@@ -184,6 +263,9 @@ class ConfigManager:
         self.config_dir = config_dir or CONFIG_DIR
         self._config: Optional[AppConfig] = None
         self._history: List[ClientRecord] = []
+        self._master_config = None  # MasterConfig instance (lazy loaded)
+        self._master_config_loaded = False  # Sentinel: True once load attempted
+        self._available_clients: List[str] = []
 
         # Ensure config directory exists
         self._ensure_config_dir()
@@ -207,13 +289,109 @@ class ConfigManager:
         """Get path to activity log file."""
         return self.config_dir / LOG_FILENAME
 
+    # =========================================================================
+    # Master Config Integration
+    # =========================================================================
+
+    def _load_master_config(self):
+        """Load the shared MasterConfig (lazy, one-time).
+
+        Raises RuntimeError if MasterConfig cannot be loaded.
+        """
+        if self._master_config_loaded:
+            return
+        self._master_config_loaded = True
+        self._master_config = _get_master_config()  # raises on failure
+        self._available_clients = self._master_config.list_clients()
+        log_info(f"Master config loaded: {len(self._available_clients)} clients available")
+
+    def get_available_clients(self) -> List[str]:
+        """Get list of client keys from the master config.
+
+        Returns:
+            List of client key strings (e.g., ["BostonHCP", "OtherClient"])
+        """
+        self._load_master_config()
+        return list(self._available_clients)
+
+    def _merge_master_config(self, config: AppConfig) -> AppConfig:
+        """
+        Overlay master config values onto an AppConfig.
+
+        Non-secret values (Drive folders, HubSpot portal/pipeline,
+        QBO realm/sandbox) are pulled from the master sheet for the
+        client identified by config.configuration_name.
+
+        Local secrets (QBO client_id/secret, Places API key, etc.)
+        are preserved from the local config.
+
+        Args:
+            config: AppConfig with local secrets loaded
+
+        Returns:
+            The same AppConfig, updated with master config values
+
+        Raises:
+            RuntimeError: If MasterConfig is unavailable
+            KeyError: If configuration_name is not found in master config
+        """
+        self._load_master_config()  # raises on failure
+
+        client_key = config.configuration_name
+        if not client_key:
+            raise ValueError(
+                "configuration_name is not set in config.json - "
+                "cannot look up client in master config"
+            )
+
+        try:
+            client_cfg = self._master_config.get_client(client_key)
+        except KeyError:
+            raise KeyError(
+                f"Client '{client_key}' not found in master config. "
+                f"Available: {self._available_clients}"
+            )
+
+        # Google Drive - from master config
+        if client_cfg.drive.template_folder_id:
+            config.google_drive.template_folder_id = client_cfg.drive.template_folder_id
+        if client_cfg.drive.destination_folder_id:
+            config.google_drive.destination_folder_id = client_cfg.drive.destination_folder_id
+
+        # HubSpot - from master config
+        if client_cfg.hubspot.portal_id:
+            config.hubspot.portal_id = client_cfg.hubspot.portal_id
+        if client_cfg.hubspot.deal_pipeline:
+            config.hubspot.deal_pipeline = client_cfg.hubspot.deal_pipeline
+        if client_cfg.hubspot.deal_stage:
+            config.hubspot.deal_stage = client_cfg.hubspot.deal_stage
+
+        # QBO - realm_id and environment from master config
+        if client_cfg.qbo.realm_id:
+            config.quickbooks.realm_id = client_cfg.qbo.realm_id
+        if client_cfg.qbo.environment:
+            config.quickbooks.use_sandbox = (
+                client_cfg.qbo.environment.lower() == "sandbox"
+            )
+
+        log_info(f"Merged master config for client '{client_key}'")
+        return config
+
+    # =========================================================================
+    # Config Load / Save
+    # =========================================================================
+
     def has_config(self) -> bool:
         """Check if configuration exists locally."""
         return self._get_config_path().exists()
 
     def load_config(self) -> Optional[AppConfig]:
         """
-        Load configuration from local file.
+        Load configuration from local file, then merge master config.
+
+        Local config.json provides secrets (QBO client_id/secret,
+        Places API key, etc.). Master config provides non-secret
+        settings (Drive folders, HubSpot portal, QBO realm).
 
         Returns:
             AppConfig if found, None otherwise
@@ -229,6 +407,10 @@ class ConfigManager:
                 data = json.load(f)
 
             self._config = AppConfig.from_dict(data)
+
+            # Merge non-secret values from master config
+            self._config = self._merge_master_config(self._config)
+
             log_info(f"Loaded configuration: {self._config.configuration_name}")
             return self._config
 
@@ -242,6 +424,9 @@ class ConfigManager:
     def save_config(self, config: AppConfig) -> bool:
         """
         Save configuration to local file.
+
+        Only saves local secrets - master config values are not persisted
+        locally since they come from the shared Google Sheet.
 
         Args:
             config: Configuration to save
@@ -356,9 +541,64 @@ class ConfigManager:
         except Exception as e:
             log_error(f"Migration warning: token saved to keyring but could not update config.json: {e}")
 
+    def migrate_qbo_credentials(self) -> None:
+        """
+        One-time migration: move QBO client_id/client_secret from
+        config.json to the OS keyring.
+
+        If config.json contains quickbooks.client_id and/or
+        quickbooks.client_secret, this method stores them in the keyring
+        and removes them from the JSON file. No-ops if nothing to migrate.
+        """
+        config_path = self._get_config_path()
+        if not config_path.exists():
+            return
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        qb = data.get('quickbooks', {})
+        old_id = qb.get('client_id')
+        old_secret = qb.get('client_secret')
+        if not old_id and not old_secret:
+            return
+
+        # Store in keyring
+        try:
+            if old_id:
+                keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID, old_id)
+            if old_secret:
+                keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET, old_secret)
+        except Exception as e:
+            log_error(f"QBO migration failed: could not save credentials to keyring: {e}")
+            return
+
+        # Remove from JSON and rewrite
+        changed = False
+        if 'client_id' in qb:
+            del data['quickbooks']['client_id']
+            changed = True
+        if 'client_secret' in qb:
+            del data['quickbooks']['client_secret']
+            changed = True
+
+        if changed:
+            try:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+                log_info("Migrated QBO credentials from config.json to OS keyring")
+            except Exception as e:
+                log_error(
+                    f"QBO migration warning: credentials saved to keyring "
+                    f"but could not update config.json: {e}"
+                )
+
     def update_places_api_key(self, new_key: str) -> bool:
         """
-        Update Google Places API key.
+        Update Google Places API key in the OS keyring.
 
         Args:
             new_key: New API key
@@ -366,12 +606,60 @@ class ConfigManager:
         Returns:
             True on success
         """
-        config = self.get_config()
-        if not config:
+        try:
+            keyring.set_password(PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME, new_key)
+            # Update in-memory config if loaded
+            config = self.get_config()
+            if config:
+                config.google_places.api_key = new_key
+            log_info("Google Places API key saved to OS keyring")
+            return True
+        except Exception as e:
+            log_error(f"Error saving Google Places API key to keyring: {e}")
             return False
 
-        config.google_places.api_key = new_key
-        return self.save_config(config)
+    def migrate_places_api_key(self) -> None:
+        """
+        One-time migration: move Google Places API key from config.json
+        to the OS keyring.
+
+        If config.json contains a google_places.api_key field, this method
+        stores it in the keyring and removes it from the JSON file.
+        No-ops if nothing to migrate.
+        """
+        config_path = self._get_config_path()
+        if not config_path.exists():
+            return
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        gp = data.get('google_places', {})
+        old_key = gp.get('api_key')
+        if not old_key:
+            return
+
+        # Store in keyring
+        try:
+            keyring.set_password(PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME, old_key)
+        except Exception as e:
+            log_error(f"Places migration failed: could not save key to keyring: {e}")
+            return
+
+        # Remove from JSON and rewrite
+        del data['google_places']
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            log_info("Migrated Google Places API key from config.json to OS keyring")
+        except Exception as e:
+            log_error(
+                f"Places migration warning: key saved to keyring "
+                f"but could not update config.json: {e}"
+            )
 
     # =========================================================================
     # Client History

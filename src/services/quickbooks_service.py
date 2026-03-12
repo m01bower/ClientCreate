@@ -43,8 +43,8 @@ QBO_API_BASE_PRODUCTION = "https://quickbooks.api.intuit.com"
 QBO_SCOPES = ["com.intuit.quickbooks.accounting"]
 
 # Local redirect URI for OAuth callback
-# Using port 5588 to avoid common port conflicts
-REDIRECT_URI = "http://localhost:5588/callback"
+# Standardized to port 8080 across all QBO projects
+REDIRECT_URI = "http://localhost:8080/callback"
 
 # Token storage path - relative to project root
 # Path: src/services/quickbooks_service.py -> go up 3 levels to project root, then config/
@@ -300,7 +300,7 @@ class QuickBooksService:
             log_info("Please authorize the application in your browser.")
 
             # Start local HTTP server for callback
-            server = HTTPServer(('localhost', 5588), OAuthCallbackHandler)
+            server = HTTPServer(('localhost', 8080), OAuthCallbackHandler)
             server.auth_code = None
             server.realm_id = None
             server.error = None
@@ -775,6 +775,7 @@ class QuickBooksService:
                     update_data = {
                         "Id": customer_id,
                         "SyncToken": customer_data.get('SyncToken', '0'),
+                        "DisplayName": customer_data.get('DisplayName'),
                         "SalesTermRef": {
                             "value": term_id
                         }

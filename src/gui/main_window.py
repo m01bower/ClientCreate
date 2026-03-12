@@ -214,8 +214,9 @@ class MainWindow(tk.Tk):
         # Initialize config manager first (local storage - no auth needed)
         self.config_manager = init_config_manager()
 
-        # Auto-migrate token from config.json to keyring (one-time, silent)
+        # Auto-migrate secrets from config.json to keyring (one-time, silent)
         self.config_manager.migrate_hubspot_token()
+        self.config_manager.migrate_places_api_key()
 
         # Check for existing local configuration (standalone mode)
         if self.config_manager.has_config():
@@ -282,6 +283,9 @@ class MainWindow(tk.Tk):
         hubspot_token = self.config_manager.get_hubspot_token()
         if hubspot_token:
             self.hubspot_service = init_hubspot_service(hubspot_token)
+            # Set portal_id from config (used for URL generation)
+            if self.app_config.hubspot.portal_id:
+                self.hubspot_service.portal_id = self.app_config.hubspot.portal_id
 
         # Initialize company lookup service
         self.lookup_service = get_company_lookup_service()
@@ -798,9 +802,14 @@ Version 1.1
                         result['hubspot_deal_id'] = "DRY_RUN"
                         result['hubspot_deal_url'] = "DRY_RUN"
                     else:
+                        # Pass deal pipeline/stage from config if available
+                        deal_stage = getattr(self.app_config.hubspot, 'deal_stage', '') if self.app_config else ''
+                        deal_pipeline = getattr(self.app_config.hubspot, 'deal_pipeline', '') if self.app_config else ''
                         success, deal_id, error = self.hubspot_service.create_deal(
                             company_name,
                             company_id,
+                            stage_id=deal_stage or None,
+                            pipeline_id=deal_pipeline or None,
                             dry_run=False
                         )
                         if not success:

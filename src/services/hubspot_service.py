@@ -367,6 +367,8 @@ class HubSpotService:
 
     def get_company_url(self, company_id: str) -> str:
         """Get the HubSpot URL for a company."""
+        if self.portal_id:
+            return f"https://app.hubspot.com/contacts/{self.portal_id}/company/{company_id}"
         return f"https://app.hubspot.com/contacts/companies/{company_id}"
 
     # =========================================================================
@@ -475,6 +477,7 @@ class HubSpotService:
         company_name: str,
         company_id: str,
         stage_id: Optional[str] = None,
+        pipeline_id: Optional[str] = None,
         dry_run: bool = False
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
@@ -484,6 +487,7 @@ class HubSpotService:
             company_name: Company name for deal name
             company_id: HubSpot company ID to associate
             stage_id: Deal stage ID (will look up "Closed Won" if not provided)
+            pipeline_id: Deal pipeline ID (uses HubSpot default if not provided)
             dry_run: If True, don't actually create
 
         Returns:
@@ -530,6 +534,9 @@ class HubSpotService:
             if stage_id:
                 properties["dealstage"] = stage_id
 
+            if pipeline_id:
+                properties["pipeline"] = pipeline_id
+
             # Create association with company
             associations = [
                 PublicAssociationsForObject(
@@ -562,6 +569,8 @@ class HubSpotService:
 
     def get_deal_url(self, deal_id: str) -> str:
         """Get the HubSpot URL for a deal."""
+        if self.portal_id:
+            return f"https://app.hubspot.com/contacts/{self.portal_id}/deal/{deal_id}"
         return f"https://app.hubspot.com/contacts/deals/{deal_id}"
 
 
