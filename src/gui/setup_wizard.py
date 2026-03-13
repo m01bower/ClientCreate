@@ -19,6 +19,7 @@ from core.config_manager import (
     AppConfig, GoogleDriveConfig, HubSpotConfig, GooglePlacesConfig,
     QuickBooksConfig, get_config_manager, _get_master_config,
     QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID, QBO_KEYRING_CLIENT_SECRET,
+    QBO_KEYRING_SANDBOX_CLIENT_ID, QBO_KEYRING_SANDBOX_CLIENT_SECRET,
     PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME,
 )
 from services.google_drive_service import GoogleDriveService
@@ -502,8 +503,15 @@ class SetupWizard(tk.Toplevel):
         ttk.Label(self.content_frame, text="Client ID:").pack(anchor=tk.W)
 
         # Pre-populate from keyring
-        stored_client_id = keyring.get_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID) or ""
-        stored_client_secret = keyring.get_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET) or ""
+        # Load the right keys based on sandbox/production mode
+        if self.config.quickbooks.use_sandbox:
+            _id_key = QBO_KEYRING_SANDBOX_CLIENT_ID
+            _secret_key = QBO_KEYRING_SANDBOX_CLIENT_SECRET
+        else:
+            _id_key = QBO_KEYRING_CLIENT_ID
+            _secret_key = QBO_KEYRING_CLIENT_SECRET
+        stored_client_id = keyring.get_password(QBO_KEYRING_SERVICE, _id_key) or ""
+        stored_client_secret = keyring.get_password(QBO_KEYRING_SERVICE, _secret_key) or ""
 
         self.qbo_client_id_var = tk.StringVar(value=stored_client_id)
         self.qbo_client_id_entry = ttk.Entry(self.content_frame, textvariable=self.qbo_client_id_var, width=50)
@@ -728,8 +736,13 @@ class SetupWizard(tk.Toplevel):
 
             # Save credentials to OS keyring (not config.json)
             if client_id and client_secret:
-                keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID, client_id)
-                keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET, client_secret)
+                use_sandbox = self.qbo_sandbox_var.get()
+                if use_sandbox:
+                    keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_SANDBOX_CLIENT_ID, client_id)
+                    keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_SANDBOX_CLIENT_SECRET, client_secret)
+                else:
+                    keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID, client_id)
+                    keyring.set_password(QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET, client_secret)
             self.config.quickbooks.client_id = client_id
             self.config.quickbooks.client_secret = client_secret
             self.config.quickbooks.use_sandbox = self.qbo_sandbox_var.get()

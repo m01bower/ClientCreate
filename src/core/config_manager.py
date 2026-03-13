@@ -5,19 +5,18 @@ Non-secret settings (Drive folder IDs, HubSpot portal/pipeline,
 QBO realm_id, sandbox flag) come exclusively from the MasterConfig
 Google Sheet.  MasterConfig is REQUIRED - there is no local fallback.
 
-Secrets stay local:
+Secrets:
     - QBO client_id, client_secret (OS keyring, service "BosOpt")
-    - QBO tokens (config/qbo_tokens.json)
     - HubSpot access token (OS keyring, service "BostonHCP")
-    - Google credentials.json, token.json
     - Google Places API key (OS keyring, service "BosOpt")
-    - Client history (config/client_history.json)
 
-Configuration is stored in:
-    <project_root>/config/config.json         (local secrets only)
-    <project_root>/config/client_history.json
-    <project_root>/config/activity_log.txt
-    _shared_config/ master config sheet       (non-secret settings)
+Files stored in _shared_config/apps/ClientCreate/:
+    - config.json (local secrets: trial_mode, opencorporates token)
+    - client_history.json
+    - activity_log.txt
+    - qbo_tokens.json
+
+Google credentials/tokens in _shared_config/clients/{ClientName}/
 """
 
 import sys
@@ -32,23 +31,24 @@ import keyring
 from logger_setup import get_logger, log_info, log_error, log_debug
 
 
-# Local config directory - relative to project root
-# Path: src/core/config_manager.py -> go up 3 levels to project root, then config/
+# App-specific config in shared directory
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-CONFIG_DIR = _PROJECT_ROOT / "config"
+_SHARED_CONFIG_DIR = _PROJECT_ROOT.parent / "_shared_config"
+CONFIG_DIR = _SHARED_CONFIG_DIR / "apps" / "ClientCreate"
 CONFIG_FILENAME = 'config.json'
 KEYRING_SERVICE = "BostonHCP"
 KEYRING_USERNAME = "HubSpot-AccessToken"
 QBO_KEYRING_SERVICE = "BosOpt"
 QBO_KEYRING_CLIENT_ID = "QBO-ClientID"
 QBO_KEYRING_CLIENT_SECRET = "QBO-ClientSecret"
+QBO_KEYRING_SANDBOX_CLIENT_ID = "QBO-Sandbox-ClientID"
+QBO_KEYRING_SANDBOX_CLIENT_SECRET = "QBO-Sandbox-ClientSecret"
 PLACES_KEYRING_SERVICE = "BosOpt"
 PLACES_KEYRING_USERNAME = "GooglePlaces-APIKey"
 HISTORY_FILENAME = 'client_history.json'
 LOG_FILENAME = 'activity_log.txt'
 
-# Shared config path - sibling to project root
-_SHARED_CONFIG_DIR = _PROJECT_ROOT.parent / "_shared_config"
+# _SHARED_CONFIG_DIR defined above with CONFIG_DIR
 
 
 def _get_master_config():
@@ -123,8 +123,9 @@ class QuickBooksConfig:
     """QuickBooks Online configuration.
 
     realm_id and use_sandbox come from master config.
-    client_id and client_secret come from the OS keyring
-    (service "BosOpt", usernames "QBO-ClientID" / "QBO-ClientSecret").
+    client_id and client_secret come from the OS keyring.
+    Sandbox clients use "QBO-Sandbox-ClientID" / "QBO-Sandbox-ClientSecret".
+    Production clients use "QBO-ClientID" / "QBO-ClientSecret".
     """
     client_id: str = ""
     client_secret: str = ""
@@ -133,13 +134,22 @@ class QuickBooksConfig:
     trial_mode: bool = True  # Always start in trial mode for safety
 
     def load_credentials_from_keyring(self) -> None:
-        """Populate client_id and client_secret from the OS keyring."""
+        """Populate client_id and client_secret from the OS keyring.
+
+        Picks sandbox or production keys based on self.use_sandbox.
+        """
         try:
+            if self.use_sandbox:
+                id_key = QBO_KEYRING_SANDBOX_CLIENT_ID
+                secret_key = QBO_KEYRING_SANDBOX_CLIENT_SECRET
+            else:
+                id_key = QBO_KEYRING_CLIENT_ID
+                secret_key = QBO_KEYRING_CLIENT_SECRET
             self.client_id = keyring.get_password(
-                QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_ID
+                QBO_KEYRING_SERVICE, id_key
             ) or ""
             self.client_secret = keyring.get_password(
-                QBO_KEYRING_SERVICE, QBO_KEYRING_CLIENT_SECRET
+                QBO_KEYRING_SERVICE, secret_key
             ) or ""
         except Exception as e:
             from logger_setup import log_error as _log_error
