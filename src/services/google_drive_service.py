@@ -36,13 +36,15 @@ SCOPES = [
 class GoogleDriveService:
     """Service for Google Drive operations."""
 
-    def __init__(self, credentials_path: Optional[str] = None):
+    def __init__(self, credentials_path: Optional[str] = None,
+                 client_credential_dir: Optional[str] = None):
         """
         Initialize Google Drive service.
 
         Args:
             credentials_path: Path to credentials.json file.
-                            If None, uses credentials in project's config/ folder.
+            client_credential_dir: Path to client credential directory
+                (e.g. _shared_config/clients/ELW/). If None, uses BosOpt.
         """
         self.logger = get_logger()
 
@@ -50,11 +52,14 @@ class GoogleDriveService:
         # src/services/google_drive_service.py -> up 3 levels = project root
         self._project_root = Path(__file__).parent.parent.parent
 
-        # Shared credentials in _shared_config/clients/BostonHCP/
-        self._credentials_base = self._project_root.parent / "_shared_config" / "clients" / "BostonHCP"
+        # Use specified client dir or fall back to BosOpt
+        if client_credential_dir:
+            self._credentials_base = Path(client_credential_dir)
+        else:
+            self._credentials_base = self._project_root.parent / "_shared_config" / "clients" / "BosOpt"
         self.credentials_path = credentials_path or str(self._credentials_base / "credentials.json")
 
-        # Token stored in shared BostonHCP folder
+        # Token stored alongside credentials
         self._token_base = self._credentials_base
         self.token_path = str(self._token_base / "token.json")
 
@@ -524,18 +529,25 @@ class GoogleDriveService:
         dest_folder_id: str,
         company_name: str,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        copy_structure: str = "All files all levels",
+        _depth: int = 0
     ) -> Tuple[bool, List[str], Optional[str]]:
         """
         Recursively copy all contents from source to destination folder.
-        Replaces "Client" in filenames with company name (case-insensitive).
+        Replaces "CLIENT" (case-sensitive) in names with company name.
 
         Args:
             source_folder_id: Source folder ID (template)
             dest_folder_id: Destination folder ID (new client folder)
-            company_name: Company name to replace "Client" with
+            company_name: Company name to replace "CLIENT" with
             progress_callback: Optional callback(filename, current, total)
             dry_run: If True, don't actually copy, just report what would happen
+            copy_structure: Rename mode from Master Config:
+                "No" - no renaming at any level
+                "1st level only" - rename only at the first subfolder level
+                "All files all levels" - rename at all levels
+            _depth: Internal recursion depth tracker (0 = first level)
 
         Returns:
             Tuple of (success, list_of_copied_files, error_message)
@@ -554,12 +566,17 @@ class GoogleDriveService:
                 item_id = item['id']
                 item_type = item['mimeType']
 
-                # Determine new name (replace Client with company name, case-insensitive)
-                new_name = re.sub(
-                    r'(?i)client',
-                    company_name,
-                    item_name
+                # Determine new name — case-sensitive CLIENT replacement
+                # based on copy_structure setting and current depth
+                should_rename = (
+                    copy_structure.lower() != "no"
+                    and (copy_structure.lower() == "all files all levels"
+                         or (_depth == 0 and "1st level" in copy_structure.lower()))
                 )
+                if should_rename:
+                    new_name = item_name.replace("CLIENT", company_name)
+                else:
+                    new_name = item_name
 
                 if progress_callback:
                     progress_callback(item_name, i + 1, total)
@@ -567,27 +584,30 @@ class GoogleDriveService:
                 if item_type == 'application/vnd.google-apps.folder':
                     # It's a folder - create it and recurse
                     if dry_run:
-                        log_info(f"[DRY RUN] Would create folder: {item_name}")
-                        copied_files.append(f"[FOLDER] {item_name}")
+                        log_info(f"[DRY RUN] Would create folder: {new_name}")
+                        copied_files.append(f"[FOLDER] {new_name}")
                     else:
                         success, new_folder_id, error = self.create_folder(
-                            item_name,  # Keep original folder name
+                            new_name,
                             dest_folder_id
                         )
                         if not success:
-                            return False, copied_files, f"Failed to create folder {item_name}: {error}"
+                            return False, copied_files, f"Failed to create folder {new_name}: {error}"
 
-                        # Recurse into subfolder
+                    # Recurse into subfolder
+                    recurse_dest = "DRY_RUN" if dry_run else new_folder_id
+                    if not dry_run or True:  # Always recurse to show full tree in dry run
                         success, sub_files, error = self.copy_folder_contents(
                             item_id,
-                            new_folder_id,
+                            recurse_dest if not dry_run else dest_folder_id,
                             company_name,
                             progress_callback,
-                            dry_run
+                            dry_run,
+                            copy_structure,
+                            _depth + 1
                         )
-                        if not success:
+                        if not dry_run and not success:
                             return False, copied_files, error
-
                         copied_files.extend(sub_files)
                 else:
                     # It's a file - copy it
@@ -613,9 +633,9 @@ class GoogleDriveService:
 _drive_service: Optional[GoogleDriveService] = None
 
 
-def get_drive_service() -> GoogleDriveService:
+def get_drive_service(client_credential_dir: Optional[str] = None) -> GoogleDriveService:
     """Get or create the Google Drive service instance."""
     global _drive_service
     if _drive_service is None:
-        _drive_service = GoogleDriveService()
+        _drive_service = GoogleDriveService(client_credential_dir=client_credential_dir)
     return _drive_service

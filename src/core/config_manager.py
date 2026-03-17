@@ -363,10 +363,10 @@ class ConfigManager:
             )
 
         # Google Drive - from master config
-        if client_cfg.drive.template_folder_id:
-            config.google_drive.template_folder_id = client_cfg.drive.template_folder_id
-        if client_cfg.drive.destination_folder_id:
-            config.google_drive.destination_folder_id = client_cfg.drive.destination_folder_id
+        if client_cfg.drive.client_template_folder_id:
+            config.google_drive.template_folder_id = client_cfg.drive.client_template_folder_id
+        if client_cfg.drive.client_destination_folder_id:
+            config.google_drive.destination_folder_id = client_cfg.drive.client_destination_folder_id
 
         # HubSpot - from master config
         if client_cfg.hubspot.portal_id:

@@ -248,7 +248,28 @@ class MainWindow(tk.Tk):
 
     def _init_drive_service(self):
         """Initialize Google Drive service with authentication."""
-        self.drive_service = get_drive_service()
+        # Resolve credential dir from Master Config if a client is configured
+        client_cred_dir = None
+        if self.app_config and self.app_config.configuration_name:
+            try:
+                mc = self.config_manager._master_config
+                if mc is None:
+                    self.config_manager._load_master_config()
+                    mc = self.config_manager._master_config
+                client_cfg = mc.get_client(self.app_config.configuration_name)
+                cred_ref = client_cfg.client.credential_ref
+                if cred_ref:
+                    from pathlib import Path
+                    # credential_ref is relative like "_shared_config/clients/ELW"
+                    project_root = Path(__file__).parent.parent.parent
+                    cred_path = project_root.parent / cred_ref
+                    if cred_path.exists():
+                        client_cred_dir = str(cred_path)
+                        log_info(f"Using credentials from: {cred_ref}")
+            except Exception as e:
+                log_warning(f"Could not resolve client credentials: {e}")
+
+        self.drive_service = get_drive_service(client_credential_dir=client_cred_dir)
 
         if not self.drive_service.has_credentials_file():
             self._append_status("ERROR: credentials.json not found!")
@@ -279,13 +300,24 @@ class MainWindow(tk.Tk):
         if not self.app_config:
             return
 
-        # Initialize HubSpot service (token stored in OS keyring)
-        hubspot_token = self.config_manager.get_hubspot_token()
-        if hubspot_token:
-            self.hubspot_service = init_hubspot_service(hubspot_token)
-            # Set portal_id from config (used for URL generation)
-            if self.app_config.hubspot.portal_id:
-                self.hubspot_service.portal_id = self.app_config.hubspot.portal_id
+        # Initialize HubSpot service — only if active for this client in Master Config
+        hubspot_active = False
+        try:
+            client_key = self.app_config.configuration_name
+            mc_client = self.config_manager._master_config.get_client(client_key)
+            hubspot_active = mc_client.hubspot.active
+        except Exception:
+            pass
+
+        if hubspot_active:
+            hubspot_token = self.config_manager.get_hubspot_token()
+            if hubspot_token:
+                self.hubspot_service = init_hubspot_service(hubspot_token)
+                if self.app_config.hubspot.portal_id:
+                    self.hubspot_service.portal_id = self.app_config.hubspot.portal_id
+        else:
+            self.hubspot_service = None
+            log_info("HubSpot not active for this client — skipping")
 
         # Initialize company lookup service
         self.lookup_service = get_company_lookup_service()
@@ -301,7 +333,8 @@ class MainWindow(tk.Tk):
             client_secret=self.app_config.quickbooks.client_secret,
             realm_id=self.app_config.quickbooks.realm_id,
             use_sandbox=self.app_config.quickbooks.use_sandbox,
-            trial_mode=self.app_config.quickbooks.trial_mode
+            trial_mode=self.app_config.quickbooks.trial_mode,
+            client_key=self.app_config.configuration_name
         )
         if self.app_config.quickbooks.client_id:
             if self.app_config.quickbooks.trial_mode:
@@ -610,15 +643,36 @@ Version 1.1
             if company_info.executives:
                 log_info(f"Found {len(company_info.executives)} executive(s)")
 
-            # Fetch default rates for the Rates tab
+            # Fetch default rates — only if Rates tab in Master Config has a value for this client
             default_rates = None
-            rates_service = get_rates_service(self.drive_service)
-            if rates_service:
-                try:
-                    default_rates = rates_service.get_defaults()
-                    log_info("Loaded default billing rates from spreadsheet")
-                except Exception as e:
-                    log_warning(f"Could not load default rates: {e}")
+            rates_service = None
+            rates_active = False
+            try:
+                client_key = self.app_config.configuration_name
+                result_rates = self.config_manager._master_config._service.spreadsheets().values().get(
+                    spreadsheetId=self.config_manager._master_config._sheet_id,
+                    range='Rates!A1:Z2'
+                ).execute()
+                rows = result_rates.get('values', [])
+                if len(rows) >= 2:
+                    client_keys = [v.strip() for v in rows[0][1:] if v.strip()]
+                    tab_values = rows[1][1:] if len(rows[1]) > 1 else []
+                    col_idx = client_keys.index(client_key) if client_key in client_keys else -1
+                    if col_idx >= 0 and col_idx < len(tab_values) and tab_values[col_idx].strip():
+                        rates_active = True
+            except Exception:
+                pass
+
+            if rates_active:
+                rates_service = get_rates_service(self.drive_service)
+                if rates_service:
+                    try:
+                        default_rates = rates_service.get_defaults()
+                        log_info("Loaded default billing rates from spreadsheet")
+                    except Exception as e:
+                        log_warning(f"Could not load default rates: {e}")
+            else:
+                log_info("Rates not configured for this client — skipping")
 
             # Search HubSpot BEFORE dialog so we can show it as a tab
             hubspot_existing = None
@@ -879,13 +933,22 @@ Version 1.1
                 log_info(f"Created folder: {company_name}")
 
                 # Copy template contents
-                log_info("Copying template files...")
+                # Get copy_structure setting from Master Config
+                copy_structure = "All files all levels"
+                try:
+                    client_key = self.app_config.configuration_name
+                    mc_client = self.config_manager._master_config.get_client(client_key)
+                    copy_structure = mc_client.drive.copy_structure_only or copy_structure
+                except Exception:
+                    pass
+                log_info(f"Copying template files (rename mode: {copy_structure})...")
                 success, copied_files, error = self.drive_service.copy_folder_contents(
                     self.app_config.google_drive.template_folder_id,
                     folder_id,
                     company_name,
                     progress_callback=lambda f, c, t: log_info(f"  [{c}/{t}] {f}"),
-                    dry_run=False
+                    dry_run=False,
+                    copy_structure=copy_structure
                 )
                 if not success:
                     log_warning(f"Some files may not have copied: {error}")

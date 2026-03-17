@@ -67,20 +67,30 @@ class SetupWizard(tk.Toplevel):
 
         # Window setup
         self.title("ClientCreate - Setup Wizard")
-        self.geometry("550x450")
-        self.resizable(False, False)
+        self.geometry("550x600")
+        self.resizable(False, True)
         self.transient(parent)
         self.grab_set()
 
         # Center on parent
         self.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() - 550) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 450) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 600) // 2
         self.geometry(f"+{x}+{y}")
 
         # Current step (0-indexed)
         self.current_step = 0
-        self.total_steps = 6
+
+        # Default step list — rebuilt after client selection
+        self._step_methods = [
+            self._show_step_name,
+            self._show_step_google_auth,
+            self._show_step_google_folders,
+            self._show_step_hubspot,
+            self._show_step_places,
+            self._show_step_quickbooks
+        ]
+        self.total_steps = len(self._step_methods)
 
         # Build UI
         self._build_ui()
@@ -165,16 +175,7 @@ class SetupWizard(tk.Toplevel):
         self.next_btn.config(text="Finish" if step == self.total_steps - 1 else "Next →")
 
         # Show appropriate step content
-        step_methods = [
-            self._show_step_name,
-            self._show_step_google_auth,
-            self._show_step_google_folders,
-            self._show_step_hubspot,
-            self._show_step_places,
-            self._show_step_quickbooks
-        ]
-
-        step_methods[step]()
+        self._step_methods[step]()
 
     def _show_step_name(self):
         """Step 1: Configuration name (client selection)."""
@@ -241,10 +242,10 @@ class SetupWizard(tk.Toplevel):
             client_cfg = self._master_config.get_client(client_key)
 
             # Pre-populate Drive folder IDs
-            if client_cfg.drive.template_folder_id:
-                self.config.google_drive.template_folder_id = client_cfg.drive.template_folder_id
-            if client_cfg.drive.destination_folder_id:
-                self.config.google_drive.destination_folder_id = client_cfg.drive.destination_folder_id
+            if client_cfg.drive.client_template_folder_id:
+                self.config.google_drive.template_folder_id = client_cfg.drive.client_template_folder_id
+            if client_cfg.drive.client_destination_folder_id:
+                self.config.google_drive.destination_folder_id = client_cfg.drive.client_destination_folder_id
 
             # Pre-populate HubSpot
             if client_cfg.hubspot.portal_id:
@@ -262,7 +263,21 @@ class SetupWizard(tk.Toplevel):
                     client_cfg.qbo.environment.lower() == "sandbox"
                 )
 
-            log_info(f"Pre-populated config from master for client '{client_key}'")
+            # Rebuild step list based on what's active for this client
+            self._step_methods = [
+                self._show_step_name,
+                self._show_step_google_auth,
+                self._show_step_google_folders,
+            ]
+            if client_cfg.hubspot.active:
+                self._step_methods.append(self._show_step_hubspot)
+            self._step_methods.append(self._show_step_places)
+            if client_cfg.qbo.active:
+                self._step_methods.append(self._show_step_quickbooks)
+            self.total_steps = len(self._step_methods)
+
+            log_info(f"Pre-populated config from master for client '{client_key}' "
+                     f"({self.total_steps} steps)")
         except KeyError:
             log_warning(f"Client '{client_key}' not found in master config")
 
@@ -681,60 +696,46 @@ class SetupWizard(tk.Toplevel):
 
     def _validate_step(self) -> bool:
         """Validate current step before proceeding."""
-        if self.current_step == 0:
-            # Configuration name / client selection
+        current_method = self._step_methods[self.current_step]
+
+        if current_method == self._show_step_name:
             name = self.name_var.get().strip()
             if not name:
                 messagebox.showwarning("Validation", "Please select a client configuration.")
                 return False
             self.config.configuration_name = name
-            # Pre-populate master config values for the selected client
             self._on_client_selected()
 
-        elif self.current_step == 1:
-            # Google auth
+        elif current_method == self._show_step_google_auth:
             if not self.google_authenticated:
                 messagebox.showwarning("Validation", "Please authenticate with Google first.")
                 return False
 
-        elif self.current_step == 2:
-            # Google folders
+        elif current_method == self._show_step_google_folders:
             template_id = self.template_var.get().strip()
             dest_id = self.dest_var.get().strip()
-
             if not template_id or not dest_id:
                 messagebox.showwarning("Validation", "Please enter both folder IDs.")
                 return False
-
             self.config.google_drive.template_folder_id = template_id
             self.config.google_drive.destination_folder_id = dest_id
 
-        elif self.current_step == 3:
-            # HubSpot
+        elif current_method == self._show_step_hubspot:
             token = self.hubspot_var.get().strip()
-            if not token:
-                messagebox.showwarning("Validation", "Please enter HubSpot access token.")
-                return False
             self._hubspot_token = token
 
-        elif self.current_step == 4:
-            # Google Places (optional) - save to OS keyring
+        elif current_method == self._show_step_places:
             api_key = self.places_var.get().strip()
             if api_key:
                 keyring.set_password(PLACES_KEYRING_SERVICE, PLACES_KEYRING_USERNAME, api_key)
             self.config.google_places.api_key = api_key
 
-        elif self.current_step == 5:
-            # QuickBooks Online (optional)
+        elif current_method == self._show_step_quickbooks:
             client_id = self.qbo_client_id_var.get().strip()
             client_secret = self.qbo_client_secret_var.get().strip()
-
-            # Both must be provided or both empty
             if bool(client_id) != bool(client_secret):
                 messagebox.showwarning("Validation", "Please enter both Client ID and Client Secret, or leave both empty to skip.")
                 return False
-
-            # Save credentials to OS keyring (not config.json)
             if client_id and client_secret:
                 use_sandbox = self.qbo_sandbox_var.get()
                 if use_sandbox:

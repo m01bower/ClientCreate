@@ -46,10 +46,9 @@ QBO_SCOPES = ["com.intuit.quickbooks.accounting"]
 # Standardized to port 8080 across all QBO projects
 REDIRECT_URI = "http://localhost:8080/callback"
 
-# Token storage path - relative to project root
-# Path: src/services/quickbooks_service.py -> go up 3 levels to project root, then config/
+# Shared QBO token storage — one token per client, shared across all QBO apps
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-TOKEN_FILE = _PROJECT_ROOT / "config" / "qbo_tokens.json"
+_SHARED_QBO_TOKENS_DIR = _PROJECT_ROOT.parent / "_shared_config" / "qbo_tokens"
 
 
 class QBOStatus(Enum):
@@ -170,7 +169,8 @@ class QuickBooksService:
         client_secret: Optional[str] = None,
         realm_id: Optional[str] = None,
         use_sandbox: bool = True,
-        trial_mode: bool = True
+        trial_mode: bool = True,
+        client_key: str = ""
     ):
         """
         Initialize QuickBooks service.
@@ -181,18 +181,23 @@ class QuickBooksService:
             realm_id: QuickBooks company (realm) ID
             use_sandbox: Use sandbox environment (default True for safety)
             trial_mode: Run in trial mode - no actual changes (default True)
+            client_key: Client key for token storage (e.g. "ELW", "BostonHCP")
         """
         self.client_id = client_id
         self.client_secret = client_secret
         self.realm_id = realm_id
         self.use_sandbox = use_sandbox
         self.trial_mode = trial_mode
+        self.client_key = client_key
 
         self.access_token: Optional[str] = None
         self.refresh_token: Optional[str] = None
         self.token_expiry: Optional[datetime] = None
 
         self._api_base = QBO_API_BASE_SANDBOX if use_sandbox else QBO_API_BASE_PRODUCTION
+
+        # Token file — shared across all QBO apps, keyed by client
+        self._token_file = _SHARED_QBO_TOKENS_DIR / f"{client_key.lower()}.json" if client_key else None
 
         # Load existing tokens if available
         self._load_tokens()
@@ -202,34 +207,38 @@ class QuickBooksService:
         return f"{self._api_base}/v3/company/{self.realm_id}/{endpoint}"
 
     def _load_tokens(self):
-        """Load tokens from storage."""
-        if TOKEN_FILE.exists():
-            try:
-                with open(TOKEN_FILE, 'r') as f:
-                    data = json.load(f)
-                self.access_token = data.get('access_token')
-                self.refresh_token = data.get('refresh_token')
-                self.realm_id = data.get('realm_id') or self.realm_id
-                expiry_str = data.get('token_expiry')
-                if expiry_str:
-                    self.token_expiry = datetime.fromisoformat(expiry_str)
-                log_debug("Loaded QBO tokens from storage")
-            except Exception as e:
-                log_warning(f"Could not load QBO tokens: {e}")
+        """Load tokens from shared storage."""
+        if not self._token_file or not self._token_file.exists():
+            return
+        try:
+            with open(self._token_file, 'r') as f:
+                data = json.load(f)
+            self.access_token = data.get('access_token')
+            self.refresh_token = data.get('refresh_token')
+            self.realm_id = data.get('realm_id') or self.realm_id
+            expiry_str = data.get('token_expiry')
+            if expiry_str:
+                self.token_expiry = datetime.fromisoformat(expiry_str)
+            log_debug(f"Loaded QBO tokens from {self._token_file.name}")
+        except Exception as e:
+            log_warning(f"Could not load QBO tokens: {e}")
 
     def _save_tokens(self):
-        """Save tokens to storage."""
+        """Save tokens to shared storage."""
+        if not self._token_file:
+            log_warning("No client_key set — cannot save QBO tokens")
+            return
         try:
-            TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            self._token_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 'access_token': self.access_token,
                 'refresh_token': self.refresh_token,
                 'realm_id': self.realm_id,
                 'token_expiry': self.token_expiry.isoformat() if self.token_expiry else None
             }
-            with open(TOKEN_FILE, 'w') as f:
+            with open(self._token_file, 'w') as f:
                 json.dump(data, f, indent=2)
-            log_debug("Saved QBO tokens to storage")
+            log_debug(f"Saved QBO tokens to {self._token_file.name}")
         except Exception as e:
             log_warning(f"Could not save QBO tokens: {e}")
 
@@ -856,7 +865,8 @@ def init_quickbooks_service(
     client_secret: Optional[str] = None,
     realm_id: Optional[str] = None,
     use_sandbox: bool = True,
-    trial_mode: bool = True
+    trial_mode: bool = True,
+    client_key: str = ""
 ) -> QuickBooksService:
     """
     Initialize QuickBooks service with configuration.
@@ -867,6 +877,7 @@ def init_quickbooks_service(
         realm_id: QuickBooks company (realm) ID
         use_sandbox: Use sandbox environment
         trial_mode: Run in trial mode (no actual changes)
+        client_key: Client key for shared token storage (e.g. "ELW")
 
     Returns:
         Initialized QuickBooks service
@@ -877,6 +888,7 @@ def init_quickbooks_service(
         client_secret=client_secret,
         realm_id=realm_id,
         use_sandbox=use_sandbox,
-        trial_mode=trial_mode
+        trial_mode=trial_mode,
+        client_key=client_key
     )
     return _quickbooks_service
